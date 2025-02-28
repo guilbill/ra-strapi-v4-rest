@@ -1,4 +1,3 @@
-import { stringify } from "query-string";
 import { fetchUtils, DataProvider } from "ra-core";
 import qs from "qs";
 
@@ -17,19 +16,26 @@ const OPERATORS = {
  * @returns {Array} React Admin array of objects
  */
 const strapiArrayToRa = (array: any) =>
-  array[0]?.attributes
-    ? array.map((object: any) => strapiObjectToRa(object))
-    : array.map((object: any) => strapiAttributesToRa(object));
+    array.map(
+        (object: any) => 
+            object.documentId ? strapiObjectToRa(object) 
+            : strapiAttributesToRa(object)
+    );
+
 
 /**
  * Turn Strapi objects to React Admin objects.
  * @param {Object} object Strapi object
  * @returns {Object} React Admin objects
  */
-const strapiObjectToRa = (object: any) => ({
-  id: object.id,
-  ...strapiAttributesToRa(object.attributes),
-});
+const strapiObjectToRa = (object: any) => {
+  const { documentId, id, blocks, ...attributes } = object;
+  return {
+    id: documentId,
+    ref: id,
+    ...strapiAttributesToRa(attributes),
+  };
+};
 
 /**
  * Check the attribute type and turn in a React Admin
@@ -38,67 +44,22 @@ const strapiObjectToRa = (object: any) => ({
  * @returns {Object} React Admin object
  */
 const strapiAttributesToRa = (attributes: any) => {
-  let newAttributes: any = {};
   Object.keys(attributes).forEach((key: string) => {
-    newAttributes[key] = attributes[key];
-    if (Array.isArray(attributes[key])) {
-      newAttributes[key] = strapiArrayToRa(attributes[key]);
+    const data = attributes[key];
+    if (!data) return;
+    // it's an strapi object
+    if (data.documentId) {
+      attributes[key] = strapiObjectToRa(data);
     }
-    if (
-      Array.isArray(attributes[key]?.data) &&
-      attributes[key]?.data[0]?.attributes?.mime
-    ) {
-      newAttributes[key] = attributes[key].data.map((image: any) => ({
-        id: image.id,
-        ...image.attributes,
-      }));
-
-      return;
-    }
-    if (
-      Array.isArray(attributes[key]?.data) &&
-      !attributes[key]?.data[0]?.attributes?.mime
-    ) {
-      newAttributes[key] = attributes[key].data.map((object: any) => object.id);
-    }
-    if (attributes[key]?.data?.id && !attributes[key]?.data?.attributes?.mime) {
-      newAttributes[key] = attributes[key].data.id;
-    }
-    if (attributes[key]?.data === null) {
-      newAttributes[key] = "";
-    }
-    if (attributes[key]?.id) {
-      newAttributes[key] = strapiAttributesToRa(newAttributes[key]);
-    }
-    if (attributes[key]?.data?.attributes?.mime) {
-      newAttributes[key] = strapiObjectToRa(newAttributes[key].data);
+    // it's an array of strapi objects
+    if (Array.isArray(data) && data.length > 0 && data[0]?.documentId) {
+      attributes[key] = data.map((item: any) => strapiObjectToRa(item));
     }
   });
 
-  return newAttributes;
+  return attributes;
 };
 
-/**
- * Turn empty string properties values in null.
- * @param {Object} object React Admin data object
- * @returns {Object} Strapi object
- */
-const raEmptyAttributesToStrapi = (object: any) => {
-  let newObject: any = {};
-  let components: string[] = ["stages"];
-
-  Object.keys(object).forEach((key) => {
-    const newValue = object[key] === "" ? null : object[key];
-
-    if (components.includes(key)) {
-      newObject[key] = { data: newValue };
-    } else {
-      newObject[key] = newValue;
-    }
-  });
-
-  return newObject;
-};
 
 /**
  * Turn React Admin filters in Strapi equivalent query object.
@@ -114,15 +75,14 @@ const raFilterToStrapi = (raFilter: any) => {
       return (filters[key] = raFilterToStrapi(raFilter[key]));
     }
 
-    // @ts-ignore
-    const operator = OPERATORS[key.slice(-4)];
+    const operator = OPERATORS[key.slice(-4) as keyof typeof OPERATORS];
     if (key.slice(-2) === "_q") {
       const field = key.slice(0, -2);
       filters[field] = {
         $containsi: raFilter[key],
       };
     } else if (key === "id") {
-      filters.id = {
+      filters.componentId = {
         $in: raFilter.id,
       };
     } else if (operator) {
@@ -140,99 +100,39 @@ const raFilterToStrapi = (raFilter: any) => {
   return filters;
 };
 
+
+const curateData = (data: any) => {
+    const { id, ref, createdAt, publishedAt, updatedAt, documentId, ...curatedData} = data;
+    return curatedData;
+}
+
 /**
  * Turn React Admin params in Strapi equivalent request body.
  * @param {Object} params React Admin params
  * @returns {Object} Equivalent body to add in request body.
  */
 const raToStrapiObj = (params: any) => {
-  let body: any;
-
-  const { data, multimedia } = separateMultimedia(params.data);
-
-  if (multimedia) {
-    const formData = new FormData();
-
-    for (const key in multimedia) {
-      if (Object.prototype.hasOwnProperty.call(multimedia, key)) {
-        const element = multimedia[key];
-
-        if (Array.isArray(element)) {
-          let elementIds: any[] = [];
-          element.forEach((f: any) => {
-            f.rawFile instanceof File
-              ? formData.append(`files.${key}`, f.rawFile, f.title)
-              : elementIds.push(f.id);
-          });
-
-          data[key] = elementIds;
+    const curatedData = curateData(params.data);
+    for (const key of Object.keys(curatedData)) {
+        if (curatedData[key]?.documentId) {
+            curatedData[key] = curatedData[key].id;
         }
-
-        if (
-          !Array.isArray(element) &&
-          !(element.rawFile instanceof File) &&
-          Object.prototype.hasOwnProperty.call(data, key)
-        ) {
-          data[key] = [element.id];
+        if (Array.isArray(curatedData[key])) {
+            curatedData[key] = curatedData[key].map((item: any) => item.id);
         }
-
-        if (!Array.isArray(element) && element.rawFile instanceof File) {
-          formData.append(`files.${key}`, element.rawFile, element.title);
-        }
-      }
     }
-
-    formData.append("data", JSON.stringify(raEmptyAttributesToStrapi(data)));
-    body = formData;
-  }
-
-  if (!multimedia) {
-    body = JSON.stringify({ data: raEmptyAttributesToStrapi(data) });
-  }
-
-  return body;
+  return curatedData;
 };
 
-/**
- * Separate an object in multimedia files and data
- * @param object React admin object
- * @returns
- */
-const separateMultimedia = (object: { [key: string]: any }) => {
-  let data: { [key: string]: any } = {};
-  let multimedia: { [key: string]: any } | null = {};
-
-  for (const key in object) {
-    if (Object.prototype.hasOwnProperty.call(object, key)) {
-      const element = object[key];
-      if (element?.rawFile) {
-        multimedia = { ...multimedia, [key]: element };
-      } else if (
-        Array.isArray(element) &&
-        (element[0]?.mime || element[0]?.rawFile)
-      ) {
-        multimedia = { ...multimedia, [key]: element };
-      } else {
-        data = { ...data, [key]: element };
-      }
-    }
-  }
-
-  if (Object.keys(multimedia).length === 0) {
-    multimedia = null;
-  }
-
-  return { data, multimedia };
-};
 
 /**
- * Maps react-admin queries to a Strapi V4 REST API
+ * Maps react-admin queries to a Strapi V5 REST API
  *
  * @example
  *
  * import * as React from "react";
  * import { Admin, Resource } from 'react-admin';
- * import { strapiRestProvider } from 'ra-strapi-v4-rest';
+ * import { strapiRestProvider } from 'ra-strapi-v5-rest';
  *
  * import { PostList } from './posts';
  *
@@ -247,11 +147,13 @@ const separateMultimedia = (object: { [key: string]: any }) => {
 
 export const strapiRestProvider = (
   apiUrl: string,
-  httpClient = fetchUtils.fetchJson
+  httpClient = fetchUtils.fetchJson,
 ): DataProvider => ({
   getList: (resource, params) => {
-    const { page, perPage } = params.pagination;
-    const { field, order } = params.sort;
+    const page = params.pagination?.page;
+    const perPage = params.pagination?.perPage;
+    const field = params.sort?.field;
+    const order = params.sort?.order;
 
     const query = {
       sort: [`${field}:${order}`],
@@ -268,23 +170,25 @@ export const strapiRestProvider = (
 
     const url = `${apiUrl}/${resource}?${POPULATE_ALL}&${queryStringify}`;
 
-    return httpClient(url, {}).then(({ json }) => ({
-      data: strapiArrayToRa(json.data),
-      total: json.meta.pagination.total,
-    }));
+    return httpClient(url, {}).then(({ json }) => {
+      return {
+        data: strapiArrayToRa(json.data),
+        total: json.meta.pagination.total,
+      };
+    });
   },
 
   getOne: (resource, params) =>
     httpClient(`${apiUrl}/${resource}/${params.id}?${POPULATE_ALL}`).then(
       ({ json }) => ({
         data: strapiObjectToRa(json.data),
-      })
+      }),
     ),
 
   getMany: (resource, params) => {
     const query = {
       filters: {
-        id: {
+        documentId: {
           $in: params.ids,
         },
       },
@@ -294,16 +198,17 @@ export const strapiRestProvider = (
     });
     const url = `${apiUrl}/${resource}?${queryStringify}`;
 
-    return httpClient(url).then(({ json }) => ({
+    return httpClient(url).then(({ json }) => {
+      return ({
       data: strapiArrayToRa(json.data),
       total: json.meta.total,
-    }));
+    })});
   },
 
   getManyReference: (resource, params) => {
     const { page, perPage } = params.pagination;
     const { field, order } = params.sort;
-
+    
     const query = {
       sort: [`${field}:${order}`],
       pagination: {
@@ -320,15 +225,17 @@ export const strapiRestProvider = (
       encodeValuesOnly: true,
     });
     const url = `${apiUrl}/${resource}?${POPULATE_ALL}&${queryStringify}`;
-    
-    return httpClient(url, {}).then(({ json }) => ({
+
+    return httpClient(url, {}).then(({ json }) => {
+
+      return ({
       data: strapiArrayToRa(json.data),
       total: json.meta.pagination.total,
-    }));
+    })});
   },
 
   update: (resource, params) => {
-    const body = raToStrapiObj(params);
+    const body = JSON.stringify({data: raToStrapiObj(params)});
 
     return httpClient(`${apiUrl}/${resource}/${params.id}`, {
       method: "PUT",
@@ -342,8 +249,8 @@ export const strapiRestProvider = (
         httpClient(`${apiUrl}/${resource}/${id}`, {
           method: "PUT",
           body: JSON.stringify({ data: params.data }),
-        })
-      )
+        }),
+      ),
     ).then((responses) => ({
       data: responses.map(({ json }) => json.data.id),
     })),
@@ -373,8 +280,8 @@ export const strapiRestProvider = (
           headers: new Headers({
             "Content-Type": "text/plain",
           }),
-        })
-      )
+        }),
+      ),
     ).then((responses) => ({
       data: responses.map(({ json }) => json.data.id),
     })),
